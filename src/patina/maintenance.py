@@ -550,12 +550,15 @@ def merge_entities(
 
     return result
 
+
 _CN_RE = re.compile(r"(^|/)CN=")
+
 
 def _is_truncated_dn(value: str) -> bool:
     """Return True for legacy DNs that lack a CN component."""
     normalized = value.strip().upper()
     return bool(_LEGACY_DN_RE.match(normalized)) and not _CN_RE.search(normalized)
+
 
 def find_dedup_candidates(conn: sqlite3.Connection) -> dict:
     rows = conn.execute("SELECT id, name, aliases FROM entities WHERE is_owner = 0").fetchall()

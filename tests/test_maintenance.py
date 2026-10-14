@@ -14,6 +14,7 @@ from patina.maintenance import (
     StaleSnapshotError,
     _collect_slack_ids,
     _is_junk_sender_name,
+    _is_truncated_dn,
     _name_type_rank,
     backup_store,
     clean_bogus_slack_aliases,
@@ -32,7 +33,6 @@ from patina.maintenance import (
     rewire_entity_references,
     split_dn_sink,
     store_snapshot_token,
-    _is_truncated_dn,
 )
 from patina.models import Claim, Entity, Observation, Relationship
 
@@ -2871,13 +2871,17 @@ def test_split_post_ingest_routes_to_person(db_conn):
 
 TRUNC = "/O=EXAMPLEORG/OU=ADMIN GROUP"
 
-@pytest.mark.parametrize("value,expected", [
-    (TRUNC, True),
-    ("  /o=exampleorg/ou=admin group  ", True),       # case + whitespace
-    (f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", False),      # full DN
-    ("/O=ACN=FOO", True),                             # no real CN component
-    ("alice@example.com", False),
-])
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (TRUNC, True),
+        ("  /o=exampleorg/ou=admin group  ", True),  # case + whitespace
+        (f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", False),  # full DN
+        ("/O=ACN=FOO", True),  # no real CN component
+        ("alice@example.com", False),
+    ],
+)
 def test_is_truncated_dn(value, expected):
     assert _is_truncated_dn(value) is expected
 
@@ -2886,11 +2890,15 @@ def test_truncated_dn_not_identifying(db_conn):
     """Different people sharing only a truncated DN must not be merged."""
     trunc = "/O=EXAMPLEORG/OU=ADMIN GROUP"
     _insert_entity_raw(
-        db_conn, "e1", trunc,
+        db_conn,
+        "e1",
+        trunc,
         aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_A", trunc],
     )
     _insert_entity_raw(
-        db_conn, "e2", trunc,
+        db_conn,
+        "e2",
+        trunc,
         aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_B", trunc],
     )
 
