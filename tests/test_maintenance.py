@@ -2882,23 +2882,6 @@ def test_is_truncated_dn(value, expected):
     assert _is_truncated_dn(value) is expected
 
 
-def test_truncated_dn_not_identifying(conn):
-    # two different people, same truncated DN, different full DNs
-    insert_entity(conn, name=TRUNC, aliases=[f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", TRUNC])
-    insert_entity(conn, name=TRUNC, aliases=[f"{TRUNC}/CN=RECIPIENTS/CN=USER_B", TRUNC])
-    result = find_dedup_candidates(conn)
-    assert result["candidates"] == []
-
-
-def test_full_dn_still_merges(conn):
-    # guard against over-blocking: same full DN on both -> must still be a candidate
-    full = f"{TRUNC}/CN=RECIPIENTS/CN=USER_A"
-    insert_entity(conn, name="User A", aliases=[full])
-    insert_entity(conn, name="A, User", aliases=[full])
-    result = find_dedup_candidates(conn)
-    assert len(result["candidates"]) == 1
-
-
 def test_truncated_dn_not_identifying(db_conn):
     """Different people sharing only a truncated DN must not be merged."""
     trunc = "/O=EXAMPLEORG/OU=ADMIN GROUP"
