@@ -550,7 +550,6 @@ def merge_entities(
 
     return result
 
-_LEGACY_DN_RE = re.compile(r"^/O=[^/]+(/OU=[^/]+)*$")  # check this against your existing one
 _CN_RE = re.compile(r"(^|/)CN=")
 
 def _is_truncated_dn(value: str) -> bool:
