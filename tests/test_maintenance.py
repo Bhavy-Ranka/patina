@@ -32,6 +32,7 @@ from patina.maintenance import (
     rewire_entity_references,
     split_dn_sink,
     store_snapshot_token,
+    _is_truncated_dn,
 )
 from patina.models import Claim, Entity, Observation, Relationship
 
@@ -2866,3 +2867,59 @@ def test_split_post_ingest_routes_to_person(db_conn):
 
     resolved = resolve_entity_id(db_conn, full_dn_a)
     assert resolved == "p-a"
+
+
+TRUNC = "/O=EXAMPLEORG/OU=ADMIN GROUP"
+
+@pytest.mark.parametrize("value,expected", [
+    (TRUNC, True),
+    ("  /o=exampleorg/ou=admin group  ", True),       # case + whitespace
+    (f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", False),      # full DN
+    ("/O=ACN=FOO", True),                             # no real CN component
+    ("alice@example.com", False),
+])
+def test_is_truncated_dn(value, expected):
+    assert _is_truncated_dn(value) is expected
+
+
+def test_truncated_dn_not_identifying(conn):
+    # two different people, same truncated DN, different full DNs
+    insert_entity(conn, name=TRUNC, aliases=[f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", TRUNC])
+    insert_entity(conn, name=TRUNC, aliases=[f"{TRUNC}/CN=RECIPIENTS/CN=USER_B", TRUNC])
+    result = find_dedup_candidates(conn)
+    assert result["candidates"] == []
+
+
+def test_full_dn_still_merges(conn):
+    # guard against over-blocking: same full DN on both -> must still be a candidate
+    full = f"{TRUNC}/CN=RECIPIENTS/CN=USER_A"
+    insert_entity(conn, name="User A", aliases=[full])
+    insert_entity(conn, name="A, User", aliases=[full])
+    result = find_dedup_candidates(conn)
+    assert len(result["candidates"]) == 1
+
+
+def test_truncated_dn_not_identifying(db_conn):
+    """Different people sharing only a truncated DN must not be merged."""
+    trunc = "/O=EXAMPLEORG/OU=ADMIN GROUP"
+    _insert_entity_raw(
+        db_conn, "e1", trunc,
+        aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_A", trunc],
+    )
+    _insert_entity_raw(
+        db_conn, "e2", trunc,
+        aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_B", trunc],
+    )
+
+    result = find_dedup_candidates(db_conn)
+    assert result["candidates"] == []
+
+
+def test_full_dn_still_merges(db_conn):
+    """Guard against over-blocking: a shared full DN is still identifying."""
+    full = "/O=EXAMPLEORG/OU=ADMIN GROUP/CN=RECIPIENTS/CN=USER_A"
+    _insert_entity_raw(db_conn, "e1", "User A", aliases=[full])
+    _insert_entity_raw(db_conn, "e2", "A, User", aliases=[full])
+
+    result = find_dedup_candidates(db_conn)
+    assert len(result["candidates"]) == 1
