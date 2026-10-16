@@ -14,6 +14,7 @@ from patina.maintenance import (
     StaleSnapshotError,
     _collect_slack_ids,
     _is_junk_sender_name,
+    _is_truncated_dn,
     _name_type_rank,
     backup_store,
     clean_bogus_slack_aliases,
@@ -2866,3 +2867,50 @@ def test_split_post_ingest_routes_to_person(db_conn):
 
     resolved = resolve_entity_id(db_conn, full_dn_a)
     assert resolved == "p-a"
+
+
+TRUNC = "/O=EXAMPLEORG/OU=ADMIN GROUP"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (TRUNC, True),
+        ("  /o=exampleorg/ou=admin group  ", True),  # case + whitespace
+        (f"{TRUNC}/CN=RECIPIENTS/CN=USER_A", False),  # full DN
+        ("/O=ACN=FOO", True),  # no real CN component
+        ("alice@example.com", False),
+    ],
+)
+def test_is_truncated_dn(value, expected):
+    assert _is_truncated_dn(value) is expected
+
+
+def test_truncated_dn_not_identifying(db_conn):
+    """Different people sharing only a truncated DN must not be merged."""
+    trunc = "/O=EXAMPLEORG/OU=ADMIN GROUP"
+    _insert_entity_raw(
+        db_conn,
+        "e1",
+        trunc,
+        aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_A", trunc],
+    )
+    _insert_entity_raw(
+        db_conn,
+        "e2",
+        trunc,
+        aliases=[f"{trunc}/CN=RECIPIENTS/CN=USER_B", trunc],
+    )
+
+    result = find_dedup_candidates(db_conn)
+    assert result["candidates"] == []
+
+
+def test_full_dn_still_merges(db_conn):
+    """Guard against over-blocking: a shared full DN is still identifying."""
+    full = "/O=EXAMPLEORG/OU=ADMIN GROUP/CN=RECIPIENTS/CN=USER_A"
+    _insert_entity_raw(db_conn, "e1", "User A", aliases=[full])
+    _insert_entity_raw(db_conn, "e2", "A, User", aliases=[full])
+
+    result = find_dedup_candidates(db_conn)
+    assert len(result["candidates"]) == 1
