@@ -99,7 +99,8 @@ def _bootstrap_home(home_dir: Path) -> None:
             "- If a user asks about a prior conversation, search the journal "
             "before\n"
             "  responding\n"
-            "- The journal is your long-term memory — use it\n"
+            "- The journal is your long-term memory — use it\n",
+            encoding="utf-8",
         )
 
     profile = home_dir / "PROFILE.md"
@@ -1317,6 +1318,43 @@ def entity_clean_slack_aliases_cmd(
                 typer.echo(f"  {ent['name']}: {alias}")
         if not confirm:
             typer.echo(f"{result['cleaned']} entity(ies) affected — re-run with --confirm to apply")
+    finally:
+        conn.close()
+
+
+@entity_app.command("repair-multi-identity")
+def entity_repair_multi_identity_cmd(
+    confirm: bool = typer.Option(
+        False, "--confirm", help="Apply changes (preview only without this flag)"
+    ),
+    home: Path | None = typer.Option(None, "--home", help="Custom home directory"),
+) -> None:
+    """Repair multi-identity entities retaining a member handle or name."""
+    from patina.maintenance import backup_store, repair_multi_identity_names
+
+    db_path = get_db_path(home)
+    if not db_path.exists():
+        typer.echo("Patina not initialized. Run 'patina init' first.", err=True)
+        raise typer.Exit(1)
+
+    conn = connect(db_path)
+    try:
+        if confirm:
+            backup_path = backup_store(db_path)
+            typer.echo(f"Backup: {backup_path}")
+
+        result = repair_multi_identity_names(conn, dry_run=not confirm)
+
+        if result["repaired"] == 0:
+            typer.echo("No multi-identity entities need name repair.")
+            return
+
+        mode = "Repaired" if confirm else "Would repair"
+        typer.echo(f"{mode} {result['repaired']} multi-identity entity(ies):")
+        for ent in result["entities"]:
+            typer.echo(f"  {ent['id'][:8]}: '{ent['old_name']}' -> '{ent['new_name']}'")
+        if not confirm:
+            typer.echo(f"{result['repaired']} repair(s) proposed — re-run with --confirm to apply")
     finally:
         conn.close()
 

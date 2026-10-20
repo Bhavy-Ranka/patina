@@ -10,8 +10,8 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from patina.graph import _is_multi_identity, resolve_entity_id
 from patina.graph import normalize_name as _graph_normalize
-from patina.graph import resolve_entity_id
 
 
 class StaleSnapshotError(Exception):
@@ -1664,3 +1664,57 @@ def clean_bogus_slack_aliases(
         conn.commit()
 
     return {"cleaned": len(cleaned), "entities": cleaned}
+
+
+def repair_multi_identity_names(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """Repair multi-identity entities retaining a member handle or name.
+
+    Resets the entity name to its original truncated-DN alias if present,
+    or otherwise to a neutral non-identity label (e.g. ``/O=SINK/<id>``),
+    and strips the stolen name from its aliases.
+    """
+    rows = conn.execute("SELECT id, name, aliases FROM entities WHERE is_owner = 0").fetchall()
+
+    repaired: list[dict] = []
+    for r in rows:
+        aliases = json.loads(r["aliases"] or "[]")
+        if not _is_multi_identity(r["name"], aliases):
+            continue
+
+        if _is_truncated_dn(r["name"]):
+            continue
+
+        truncated_dn = next((a for a in aliases if _is_truncated_dn(a)), None)
+        new_name = truncated_dn if truncated_dn else f"/O=SINK/{r['id'][:8]}"
+
+        old_name = r["name"]
+        old_norm = old_name.strip().lower()
+        new_aliases = [
+            a
+            for a in aliases
+            if a.strip().lower() != old_norm
+            and (a.split(":", 1)[1].strip().lower() != old_norm if ":" in a else True)
+        ]
+
+        repaired.append(
+            {
+                "id": r["id"],
+                "old_name": old_name,
+                "new_name": new_name,
+                "aliases": new_aliases,
+            }
+        )
+
+    if not dry_run and repaired:
+        for item in repaired:
+            conn.execute(
+                "UPDATE entities SET name = ?, aliases = ? WHERE id = ?",
+                (item["new_name"], json.dumps(item["aliases"]), item["id"]),
+            )
+        conn.commit()
+
+    return {"repaired": len(repaired), "entities": repaired}
