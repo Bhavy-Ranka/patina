@@ -5,8 +5,10 @@ import json
 import pytest
 
 from patina.graph import (
+    get_entity,
     insert_claim,
     insert_observation,
+    resolve_entity_id,
     upsert_entity,
     upsert_relationship,
 )
@@ -28,6 +30,7 @@ from patina.maintenance import (
     merge_entities,
     prune_non_person_entities,
     prune_slack_link_entities,
+    repair_multi_identity_names,
     reprocess_observations,
     retype_organization_entities,
     rewire_entity_references,
@@ -3382,3 +3385,238 @@ def test_split_dn_sink_slack_backfill_from_channel_peers(db_conn):
     ).fetchone()
     assert obs["sender_entity_id"] == "p-a"
     assert json.loads(obs["metadata"])["sender_slack_id"] == "U0ALICE01"
+
+
+# ── repair_multi_identity_names (#491) ──────────────────────────
+
+
+def test_repair_multi_identity_names_dry_run_zero_writes(db_conn):
+    """Dry-run mode identifies multi-identity entity with stolen name but makes zero writes."""
+    _insert_entity_raw(
+        db_conn,
+        "sink1",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+
+    result = repair_multi_identity_names(db_conn, dry_run=True)
+
+    assert result["repaired"] == 1
+    assert result["entities"][0]["old_name"] == "user_g"
+    assert result["entities"][0]["new_name"] == "/O=EXAMPLEORG/OU=X"
+
+    row = db_conn.execute("SELECT name, aliases FROM entities WHERE id = 'sink1'").fetchone()
+    assert row["name"] == "user_g"
+    aliases = json.loads(row["aliases"])
+    assert "user_g" in aliases
+
+
+def test_repair_multi_identity_names_resets_to_truncated_dn_or_neutral(db_conn):
+    """Repair resets name to original truncated DN if present, else neutral label."""
+    _insert_entity_raw(
+        db_conn,
+        "sink1",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+    _insert_entity_raw(
+        db_conn,
+        "sink2",
+        "user_h",
+        aliases=[
+            "user_h",
+            "U0EXAMPLE3",
+            "slack:U0EXAMPLE3",
+            "U0EXAMPLE4",
+            "slack:U0EXAMPLE4",
+        ],
+    )
+    _insert_entity_raw(
+        db_conn,
+        "p-normal",
+        "Dana Brook",
+        aliases=["dbrook"],
+    )
+
+    result = repair_multi_identity_names(db_conn, dry_run=False)
+
+    assert result["repaired"] == 2
+
+    # sink1 had truncated-DN alias -> restored to original truncated DN
+    row1 = db_conn.execute("SELECT name, aliases FROM entities WHERE id = 'sink1'").fetchone()
+    assert row1["name"] == "/O=EXAMPLEORG/OU=X"
+    aliases1 = json.loads(row1["aliases"])
+    assert "user_g" not in aliases1
+    assert _is_truncated_dn(row1["name"])
+
+    # sink2 had no truncated-DN alias -> assigned neutral non-identity label
+    row2 = db_conn.execute("SELECT name, aliases FROM entities WHERE id = 'sink2'").fetchone()
+    assert row2["name"] == "/O=SINK/sink2"
+    aliases2 = json.loads(row2["aliases"])
+    assert "user_h" not in aliases2
+    assert _is_truncated_dn(row2["name"])
+
+    # normal entity is untouched
+    row_p = db_conn.execute("SELECT name, aliases FROM entities WHERE id = 'p-normal'").fetchone()
+    assert row_p["name"] == "Dana Brook"
+    assert json.loads(row_p["aliases"]) == ["dbrook"]
+
+
+def test_repair_multi_identity_resolves_handle_to_real_holder(db_conn):
+    """Before repair, resolve_entity_id returns the sink; after repair, returns real holder."""
+    _insert_entity_raw(
+        db_conn,
+        "p-real",
+        "Dana Brook",
+        aliases=["user_g"],
+    )
+    _insert_entity_raw(
+        db_conn,
+        "sink",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+
+    # Pre-condition: reproduces bug where Phase 3 returns sink instead of Dana Brook
+    assert resolve_entity_id(db_conn, "user_g") == "sink"
+
+    repair_multi_identity_names(db_conn, dry_run=False)
+
+    # Post-condition: resolves to real holder
+    assert resolve_entity_id(db_conn, "user_g") == "p-real"
+
+
+def test_repair_multi_identity_subsequent_ingest_leaves_repaired_name_alone(db_conn):
+    """Later ingest leaves the repaired name alone (#486 freeze guard holds)."""
+    _insert_entity_raw(
+        db_conn,
+        "sink",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+
+    repair_multi_identity_names(db_conn, dry_run=False)
+    assert get_entity(db_conn, "sink").name == "/O=EXAMPLEORG/OU=X"
+
+    # Subsequent ingest attempt with member handle
+    upsert_entity(
+        db_conn,
+        Entity(
+            id="sink",
+            type="person",
+            name="user_g",
+            aliases=["U0EXAMPLE1", "slack:U0EXAMPLE1", "user_g"],
+        ),
+    )
+
+    ent = get_entity(db_conn, "sink")
+    assert ent.name == "/O=EXAMPLEORG/OU=X"
+
+
+def test_repair_multi_identity_dedup_review_no_longer_shows_handle(db_conn):
+    """Dedup REVIEW line no longer shows the member handle after repair."""
+    _insert_entity_raw(
+        db_conn,
+        "sink",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+
+    # Before repair: REVIEW line shows stolen handle
+    pre_dedup = find_dedup_candidates(db_conn)
+    review_names_pre = [r["name"] for r in pre_dedup.get("needs_review", [])]
+    assert "user_g" in review_names_pre
+
+    repair_multi_identity_names(db_conn, dry_run=False)
+
+    # After repair: REVIEW line shows repaired name, not handle
+    post_dedup = find_dedup_candidates(db_conn)
+    review_names_post = [r["name"] for r in post_dedup.get("needs_review", [])]
+    assert "user_g" not in review_names_post
+    assert "/O=EXAMPLEORG/OU=X" in review_names_post
+
+
+def test_cli_repair_multi_identity(db_path):
+    """CLI entity repair-multi-identity respects --confirm and defaults to dry-run."""
+    from typer.testing import CliRunner
+
+    from patina.cli import app
+    from patina.store import connect
+
+    conn = connect(db_path)
+    _insert_entity_raw(
+        conn,
+        "sink",
+        "user_g",
+        aliases=[
+            "user_g",
+            "U0EXAMPLE1",
+            "slack:U0EXAMPLE1",
+            "U0EXAMPLE2",
+            "slack:U0EXAMPLE2",
+            "/O=EXAMPLEORG/OU=X",
+        ],
+    )
+    conn.close()
+
+    runner = CliRunner()
+    home = db_path.parent
+
+    # Dry-run
+    res_dry = runner.invoke(app, ["entity", "repair-multi-identity", "--home", str(home)])
+    assert res_dry.exit_code == 0
+    assert "Would repair 1 multi-identity entity(ies)" in res_dry.output
+    assert "user_g" in res_dry.output
+
+    conn = connect(db_path)
+    row = conn.execute("SELECT name FROM entities WHERE id = 'sink'").fetchone()
+    assert row["name"] == "user_g"
+    conn.close()
+
+    # Confirm
+    res_confirm = runner.invoke(
+        app,
+        ["entity", "repair-multi-identity", "--confirm", "--home", str(home)],
+    )
+    assert res_confirm.exit_code == 0
+    assert "Repaired 1 multi-identity entity(ies)" in res_confirm.output
+
+    conn = connect(db_path)
+    row = conn.execute("SELECT name FROM entities WHERE id = 'sink'").fetchone()
+    assert row["name"] == "/O=EXAMPLEORG/OU=X"
+    conn.close()
