@@ -9,7 +9,7 @@ from patina.models import Claim, Entity, Observation, Relationship
 from patina.owner import normalize_alias
 from patina.store import record_alias_provenance
 
-_SLACK_ID_PAT = re.compile(r"^[UW](?=[A-Z0-9]*\d)[A-Z0-9]{6,10}$")
+_SLACK_ID_PAT = re.compile(r"^[UW](?=[A-Z0-9]*\d)[A-Z0-9]{8,10}$")
 _DN_CN_PAT = re.compile(r"(^|/)CN=")
 
 # --- Identity contract (#444/#447/#511) ---
@@ -82,9 +82,6 @@ def _name_type_rank(
     if kind is None:
         return len(_DISPLAY_ORDER) - 1
     return _DISPLAY_ORDER.index(kind)
-
-
-_SLACK_ID_EXTRACT_PAT = re.compile(r"^(?:slack:)?([UW][A-Z0-9]{4,})$", re.IGNORECASE)
 
 
 def _is_multi_identity(name: str, aliases: list[str]) -> bool:
@@ -223,22 +220,11 @@ def resolve_entity_id(
             ).fetchall()
 
         name_matches: set[str] = set()
-        name_multi_matches: set[str] = set()
         for r in non_owner_rows:
             if normalize_name(r["name"]) == normalized:
                 name_matches.add(r["id"])
-                r_aliases = json.loads(r["aliases"] or "[]")
-                if _is_multi_identity(r["name"], r_aliases):
-                    name_multi_matches.add(r["id"])
-
-        is_handle_name = identifier_type(name_clean) == "handle"
         if len(name_matches) == 1:
-            if not (is_handle_name and name_multi_matches):
-                return next(iter(name_matches))
-        elif name_matches:
-            holder = _sole_single_identity_holder(name_matches, name_multi_matches)
-            if holder is not None:
-                return holder
+            return name_matches.pop()
 
         if not name_matches:
             alias_matches: set[str] = set()
@@ -295,18 +281,10 @@ def resolve_entity_id(
             norm_alias = normalize_name(stripped)
             if norm_alias and len(norm_alias) > 2:
                 name_matches_2: set[str] = set()
-                name_multi_2: set[str] = set()
                 for r in non_owner_rows:
                     if normalize_name(r["name"]) == norm_alias:
                         name_matches_2.add(r["id"])
-                        r_aliases = json.loads(r["aliases"] or "[]")
-                        if is_handle and _is_multi_identity(r["name"], r_aliases):
-                            name_multi_2.add(r["id"])
-                if is_handle:
-                    holder = _sole_single_identity_holder(name_matches_2, name_multi_2)
-                    if holder is not None:
-                        return holder
-                elif len(name_matches_2) == 1:
+                if len(name_matches_2) == 1:
                     return name_matches_2.pop()
 
     return None
@@ -321,7 +299,7 @@ def _strip_foreign_slack_ids(
     result = []
     for alias in aliases:
         stripped = normalize_alias(alias)
-        if not _SLACK_ID_PAT.match(stripped.upper()):
+        if not _SLACK_ID_PAT.match(stripped):
             result.append(alias)
             continue
         row = conn.execute(

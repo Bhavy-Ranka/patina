@@ -1649,12 +1649,9 @@ class TestMultiIdentitySinkProtection:
                 "/O=EXAMPLEORG/OU=ADMIN GROUP/CN=RECIPIENTS/CN=0123456789abcdef-DBROOK",
             ],
         )
-
-    def test_is_multi_identity_short_slack_ids(self):
-        assert _is_multi_identity(
-            "/O=ACME/OU=CORP",
-            ["U001AAA", "U002BBB", "rstone"],
-        )
+    def test_is_multi_identity_handle_not_mistaken_for_slack_id(self):
+    # "WADE2024" = W + 7 chars: matches {6,10}, must not match {8,10}
+        assert not _is_multi_identity("Wade Lin", ["U0123ABCDE", "wade2024"])
 
     def test_strip_foreign_slack_ids_catches_slack_id_in_name(self, db_conn):
         # Entity e1 holds Slack ID as its name (before display name is resolved)

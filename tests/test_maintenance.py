@@ -4804,3 +4804,15 @@ def test_repair_multi_identity_names_cleans_up_residual_member_handles_on_sinks(
     row = db_conn.execute("SELECT aliases FROM entities WHERE id = 'sink_1'").fetchone()
     assert "rstone" not in json.loads(row["aliases"])
     assert resolve_entity_id(db_conn, "rstone") == "p1"
+
+def test_repair_multi_identity_names_dry_run_reports_sink_handles(db_conn):
+    _insert_entity_raw(db_conn, "sink_1", "/O=ACME/OU=CORP",
+                       aliases=["U0000000A1", "U0000000B1", "rstone"])
+    _insert_entity_raw(db_conn, "p1", "rstone", aliases=["U0000000A2"])
+
+    result = repair_multi_identity_names(db_conn, dry_run=True)
+
+    assert result["sink_handles"]["stripped"] == 1
+    assert result["sink_handles"]["entities"][0]["removed"] == ["rstone"]
+    row = db_conn.execute("SELECT aliases FROM entities WHERE id = 'sink_1'").fetchone()
+    assert "rstone" in json.loads(row["aliases"])  # nothing written

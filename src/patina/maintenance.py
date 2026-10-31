@@ -2309,9 +2309,14 @@ def repair_multi_identity_names(
         conn.commit()
 
     # Also strip any member handles on sinks that belong to single-identity entities
-    repair_sink_handle_aliases(conn, dry_run=dry_run)
+    sink_handles = repair_sink_handle_aliases(conn, dry_run=dry_run)
 
-    return {"repaired": len(repaired), "entities": repaired, "skipped": skipped}
+    return {
+        "repaired": len(repaired),
+        "entities": repaired,
+        "skipped": skipped,
+        "sink_handles": sink_handles,
+    }
 
 
 def _is_handle_alias(alias: str) -> bool:
