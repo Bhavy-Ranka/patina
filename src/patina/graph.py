@@ -9,7 +9,7 @@ from patina.models import Claim, Entity, Observation, Relationship
 from patina.owner import normalize_alias
 from patina.store import record_alias_provenance
 
-_SLACK_ID_PAT = re.compile(r"^[UW](?=[A-Z0-9]*\d)[A-Z0-9]{8,10}$")
+_SLACK_ID_PAT = re.compile(r"^[UW](?=[A-Z0-9]*\d)[A-Z0-9]{6,10}$")
 _DN_CN_PAT = re.compile(r"(^|/)CN=")
 
 # --- Identity contract (#444/#447/#511) ---
@@ -88,17 +88,22 @@ _SLACK_ID_EXTRACT_PAT = re.compile(r"^(?:slack:)?([UW][A-Z0-9]{4,})$", re.IGNORE
 
 
 def _is_multi_identity(name: str, aliases: list[str]) -> bool:
-    """True when tokens contain >1 distinct Slack ID or DN — a known sink."""
+    """True when tokens contain >1 distinct Slack ID or DN — a known sink.
+
+    Truncated DNs (/O= without CN=) are not identifiers, so they are never
+    counted as DNs here.
+    """
     slack_ids: set[str] = set()
     dns: set[str] = set()
     for token in [name] + aliases:
-        t = token.strip()
-        upper = t.upper()
-        m = _SLACK_ID_EXTRACT_PAT.match(t)
-        if m and _SLACK_ID_PAT.match(m.group(1).upper()):
-            slack_ids.add(m.group(1).upper())
-        elif upper.startswith("/O=") or "CN=" in upper:
-            dns.add(upper)
+        if not token:
+            continue
+        clean = normalize_alias(token.strip())
+        upper_clean = clean.upper()
+        if _SLACK_ID_PAT.match(upper_clean):
+            slack_ids.add(upper_clean)
+        elif identifier_type(clean) == "dn":
+            dns.add(upper_clean)
     return len(slack_ids) > 1 or len(dns) > 1
 
 
@@ -218,11 +223,22 @@ def resolve_entity_id(
             ).fetchall()
 
         name_matches: set[str] = set()
+        name_multi_matches: set[str] = set()
         for r in non_owner_rows:
             if normalize_name(r["name"]) == normalized:
                 name_matches.add(r["id"])
+                r_aliases = json.loads(r["aliases"] or "[]")
+                if _is_multi_identity(r["name"], r_aliases):
+                    name_multi_matches.add(r["id"])
+
+        is_handle_name = identifier_type(name_clean) == "handle"
         if len(name_matches) == 1:
-            return name_matches.pop()
+            if not (is_handle_name and name_multi_matches):
+                return next(iter(name_matches))
+        elif name_matches:
+            holder = _sole_single_identity_holder(name_matches, name_multi_matches)
+            if holder is not None:
+                return holder
 
         if not name_matches:
             alias_matches: set[str] = set()
@@ -279,10 +295,18 @@ def resolve_entity_id(
             norm_alias = normalize_name(stripped)
             if norm_alias and len(norm_alias) > 2:
                 name_matches_2: set[str] = set()
+                name_multi_2: set[str] = set()
                 for r in non_owner_rows:
                     if normalize_name(r["name"]) == norm_alias:
                         name_matches_2.add(r["id"])
-                if len(name_matches_2) == 1:
+                        r_aliases = json.loads(r["aliases"] or "[]")
+                        if is_handle and _is_multi_identity(r["name"], r_aliases):
+                            name_multi_2.add(r["id"])
+                if is_handle:
+                    holder = _sole_single_identity_holder(name_matches_2, name_multi_2)
+                    if holder is not None:
+                        return holder
+                elif len(name_matches_2) == 1:
                     return name_matches_2.pop()
 
     return None
@@ -297,13 +321,19 @@ def _strip_foreign_slack_ids(
     result = []
     for alias in aliases:
         stripped = normalize_alias(alias)
-        if not _SLACK_ID_PAT.match(stripped):
+        if not _SLACK_ID_PAT.match(stripped.upper()):
             result.append(alias)
             continue
         row = conn.execute(
             "SELECT id FROM entities WHERE id != ? AND is_owner = 0"
-            " AND (aliases LIKE ? OR aliases LIKE ?)",
-            (target_id, f'%"{stripped}"%', f'%"slack:{stripped}"%'),
+            " AND (UPPER(name) = ? OR UPPER(name) = ? OR aliases LIKE ? OR aliases LIKE ?)",
+            (
+                target_id,
+                stripped.upper(),
+                f"SLACK:{stripped.upper()}",
+                f'%"{stripped}"%',
+                f'%"slack:{stripped}"%',
+            ),
         ).fetchone()
         if row is None:
             result.append(alias)
